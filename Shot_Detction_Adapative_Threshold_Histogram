@@ -1,0 +1,215 @@
+%%Adaptive Threshold Apporach--- Hosanna Otchere 
+
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Jun 29 15:34:44 2022
+基於color histogram或像素差偵測鏡頭邊界
+Color histogram 的標準是連續兩幀間直方圖差異超過50%，且與前一邊界差超過1秒(30frames)
+像素差 的標準是連續兩幀間像素差總和超過75%，且與前一邊界差大於10frames (與chu-15採用相同標準)
+
+
+@author: Yuuki Misaki
+
+Edited: Hosanna Otchere 
+
+"""
+
+import os
+import cv2
+import json
+import numpy as np
+from tqdm import tqdm
+from matplotlib import pyplot as plt
+from google.colab import drive
+#drive.mount('/content/drive')
+
+
+#Dvidie input video frames into equal sized blocks
+
+
+
+
+def frame_histogram(img):
+    hist = np.zeros((256,3))
+    for channel_index in range(3):      # R,G,B channel
+        hist[:, channel_index] = cv2.calcHist([img], [channel_index], None, [256], [0,256]).T
+
+    return hist
+
+
+def block_histogram(img, block_size):
+    hist_blocks = []
+
+    for y in range(0, img.shape[0], block_size):
+        for x in range(0, img.shape[1], block_size):
+            block = img[y:y+block_size, x:x+block_size]
+            hist = frame_histogram(block)
+            hist_blocks.append(hist)
+
+    return hist_blocks
+
+def histDiff(ha, hb):
+    diff = np.sum(np.abs(ha - hb))
+    return diff / ha.shape[0]
+
+
+
+def block_hist_diff(ha_blocks, hb_blocks):
+    diffs = []
+
+    for ha_block, hb_block in zip(ha_blocks, hb_blocks):
+        diff = histDiff(ha_block, hb_block)
+
+        diffs.append(diff)
+
+    return np.array(diffs)
+
+def get_boundary(diff):
+    boundary = []
+    prev_boundary=0
+    for i in range(len(diff)):
+        if diff[i] >= 0.5 and i>(prev_boundary+30):
+            prev_boundary = i
+            boundary.append(i)
+    return boundary
+
+def dynamic_threshold(frames, window_size):
+    thresholds = []
+
+    for i in range(0, len(frames) - window_size + 1, window_size):
+        window = frames[i:i+window_size]
+        ave_diff = np.mean(window)
+        thresholds.extend([ave_diff] * window_size)
+
+    return thresholds
+
+def dynamic_block_thresholds(video_path, block_size, window_size):
+    videoCap = cv2.VideoCapture(video_path)
+    prev_frame = None
+    frame_diffs = []
+
+    while True:
+        succ, next_frame = videoCap.read()
+        if not succ:
+            break
+
+        if prev_frame is not None:
+            prev_blocks = block_histogram(prev_frame, block_size)
+            next_blocks = block_histogram(next_frame, block_size)
+            block_diffs = block_hist_diff(prev_blocks, next_blocks)
+            frame_diffs.extend(block_diffs)
+
+        if len(frame_diffs) >= window_size:
+            thresholds = dynamic_threshold(frame_diffs, block_size, window_size)
+            frame_diffs = frame_diffs[window_size // 2:]  # Overlap window
+
+            # Process thresholds and detect shot boundaries using updated thresholds
+
+        prev_frame = next_frame
+
+    videoCap.release()
+
+
+def hist_boundaries_detection(video_path, min_length=30, max_length=150):
+    videoCap = cv2.VideoCapture(video_path)
+    succ, prev_frame = videoCap.read()
+
+    frame_size = prev_frame.shape
+    total_frame = int(videoCap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame_index = 0
+    boundaries = [0]  # Add the initial boundary
+
+    # Variables for dynamic threshold calculation
+    block_size = 16  # Modify this according to your preference
+    window_size = 500  # Number of frames for each threshold calculation
+    thresholds = []  # Dynamic threshold values
+    frame_diffs = []
+
+    while True:
+        succ, next_frame = videoCap.read()
+        if not succ:
+            break
+
+        if prev_frame is not None:
+            prev_blocks = block_histogram(prev_frame, block_size)
+            next_blocks = block_histogram(next_frame, block_size)
+            block_diffs = block_hist_diff(prev_blocks, next_blocks)
+            frame_diffs.extend(block_diffs)
+
+        if len(frame_diffs) >= window_size:
+            thresholds = dynamic_threshold(frame_diffs, window_size)
+            frame_diffs = frame_diffs[window_size // 2:]  # Overlap window
+
+        dynamic_threshold_value = thresholds[frame_index % window_size]  # Cycle through thresholds
+        diff = frame_diffs[-1]
+        if frame_index - boundaries[-1] > min_length and diff > dynamic_threshold_value:
+            boundaries.append(frame_index)
+        elif frame_index - boundaries[-1] >= max_length:
+            boundaries.append(frame_index)
+
+        frame_index += 1
+        prev_frame = next_frame
+
+    boundaries.append(frame_index - 1)  # Add the last frame as boundary
+    videoCap.release()
+    boundaries.pop(0)  # Remove the initial boundary
+    return boundaries
+
+def pixel_diff(img1, img2):
+    diff = 0
+
+    diff_img = img1 - img2
+    diff = np.sum(diff_img)
+    return diff / (img1.shape[0]*img1.shape[1]*img1.shape[2])
+
+
+#Loop
+
+def write_boundary(boundary, save_name):
+    directory = os.path.dirname(save_name)
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+
+    with open(save_name, 'w') as fw:
+        for boundary_frame in boundary:
+            fw.write(f'{boundary_frame}\n')
+
+
+def is_folder(path):
+    if os.path.isdir(path):
+        return
+    else:
+        os.mkdir(path)
+        print("Create folder {}".format(path))
+        return
+
+
+
+
+if __name__ == "__main__":
+    ovp_root = '/content/drive/MyDrive/23Video_Sum.Hosanna/TvSum'
+    video_dir = os.path.join(ovp_root,'Videos')
+    boundary_dir = os.path.join(ovp_root, 'Shot_Boundary')
+
+    video_list = os.listdir(video_dir)
+
+    index_table = {}
+    for index, video_name in enumerate(video_list):
+        if '.mp4' in video_name:
+          video_path = os.path.join(video_dir, video_name)
+          boundary = hist_boundaries_detection(video_path)
+
+          index_table.update({index+1: video_name.split('.')[0]})
+          boundary_save_path = os.path.join(boundary_dir, video_name.split('.')[0]+'.txt')
+          write_boundary(boundary, boundary_save_path)
+
+
+          print(f'{video_name}...Done')
+        else:
+          pass
+
+    # Write Index Name table
+    index_table_path = os.path.join(ovp_root, 'Index_Name_Table_YT.txt')
+    with open(index_table_path, 'w') as f:
+        for key in index_table.keys():
+            f.writelines(f'{key}\t{index_table[key]}\n')
