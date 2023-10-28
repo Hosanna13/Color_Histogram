@@ -1,0 +1,139 @@
+
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Jun 29 15:34:44 2022
+基於color histogram或像素差偵測鏡頭邊界
+Color histogram 的標準是連續兩幀間直方圖差異超過50%，且與前一邊界差超過1秒(30frames)
+像素差 的標準是連續兩幀間像素差總和超過75%，且與前一邊界差大於10frames (與chu-15採用相同標準)
+
+
+@author: Yuuki Misaki
+"""
+
+import os
+import cv2
+import json
+import numpy as np
+from tqdm import tqdm
+from matplotlib import pyplot as plt
+from google.colab import drive
+#drive.mount('/content/drive')
+
+def frame_histogram(img):
+    hist = np.zeros((256,3))
+    for channel_index in range(3):      # R,G,B channel
+        hist[:, channel_index] = cv2.calcHist([img], [channel_index], None, [256], [0,256]).T
+
+    return hist
+
+
+def histDiff(ha,hb,img_size):
+    a = np.reshape(ha,-1)
+    b = np.reshape(hb,-1)
+    diff = 0
+    for i in range(len(a)):
+        tmp = abs(int(a[i])-int(b[i]))
+        diff += tmp
+    return diff/(img_size[0]*img_size[1]*img_size[2])
+
+def get_boundary(diff):
+    boundary = []
+    prev_boundary=0
+    for i in range(len(diff)):
+        if diff[i] >= 0.5 and i>(prev_boundary+30):
+            prev_boundary = i
+            boundary.append(i)
+    return boundary
+
+def hist_boundaries_detection(video_path, threshold=0.5, min_length=30, max_length=150):
+    # read video
+    videoCap = cv2.VideoCapture(video_path)
+    succ, prev_frame = videoCap.read()
+
+    frame_size = prev_frame.shape
+    total_frame = int(videoCap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame_index = 0
+    boundaries = [0]    # 先放一個0在裡面，之後再移出他
+
+    # pbar = tqdm(total_frame)
+    while True:
+        succ, next_frame = videoCap.read()
+        if not succ:
+            break
+
+        prev_hist = frame_histogram(prev_frame)
+        next_hist = frame_histogram(next_frame)
+        diff = histDiff(prev_hist, next_hist, frame_size)
+
+        # If diff meet condition
+        if diff > threshold and (frame_index-boundaries[-1]) > min_length:
+            boundaries.append(frame_index)
+        elif (frame_index-boundaries[-1]) >= max_length:
+            boundaries.append(frame_index)
+        else:
+            pass
+
+        frame_index = frame_index + 1
+        prev_frame = next_frame
+        # pbar.update(1)
+    boundaries.append(frame_index-1)      #最後一個frame也是boundary
+    videoCap.release()
+    boundaries.pop(0)       #移除剛剛多放的0
+    return boundaries
+
+def pixel_diff(img1, img2):
+    diff = 0
+
+    diff_img = img1 - img2
+    diff = np.sum(diff_img)
+    return diff / (img1.shape[0]*img1.shape[1]*img1.shape[2])
+
+def write_boundary(boundary, save_name):
+    directory = os.path.dirname(save_name)
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+
+    with open(save_name, 'w') as fw:
+        for boundary_frame in boundary:
+            fw.write(f'{boundary_frame}\n')
+
+
+def is_folder(path):
+    if os.path.isdir(path):
+        return
+    else:
+        os.mkdir(path)
+        print("Create folder {}".format(path))
+        return
+
+
+
+
+if __name__ == "__main__":
+    ovp_root = '/content/drive/MyDrive/23Video_Sum.Hosanna/Tiger'
+    video_dir = os.path.join(ovp_root,'Videos')
+    boundary_dir = os.path.join(ovp_root, 'Shot_Boundary')
+
+    video_list = os.listdir(video_dir)
+
+    index_table = {}
+    for index, video_name in enumerate(video_list):
+        if '.mp4' in video_name:
+          video_path = os.path.join(video_dir, video_name)
+          boundary = hist_boundaries_detection(video_path)
+
+          index_table.update({index+1: video_name.split('.')[0]})
+          boundary_save_path = os.path.join(boundary_dir, video_name.split('.')[0]+'.txt')
+          write_boundary(boundary, boundary_save_path)
+
+          #print(f'Boundary Save Path:{boundary_save_path}')
+
+          print(f'{video_name}...Done')
+        else:
+          pass
+
+    # Write Index Name table
+    index_table_path = os.path.join(ovp_root, 'Index_Name_Table_YT.txt')
+    with open(index_table_path, 'w') as f:
+        for key in index_table.keys():
+            f.writelines(f'{key}\t{index_table[key]}\n')
